@@ -1,0 +1,265 @@
+name: Self-Healing Pipeline
+
+# Trigger 1: After successful deployment to LangSmith
+# Trigger 2: Manual trigger for testing
+on:
+  workflow_dispatch:
+    inputs:
+      deploy_time:
+        description: "ISO timestamp of deployment (default: 1 hour ago)"
+        required: false
+        type: string
+      project_name:
+        description: "LangSmith project name"
+        required: false
+        default: "gtm-agent"
+        type: string
+      window_hours:
+        description: "Monitoring window in hours"
+        required: false
+        default: "1.0"
+        type: string
+  # Uncomment to trigger on push to main (after real deployment)
+  # push:
+  #   branches: [main]
+
+env:
+  LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+  OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+  ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  GTM_AGENT_DEPLOYMENT_URL: ${{ secrets.GTM_AGENT_DEPLOYMENT_URL }}
+  TRIAGE_AGENT_DEPLOYMENT_URL: ${{ secrets.TRIAGE_AGENT_DEPLOYMENT_URL }}
+  OPEN_SWE_DEPLOYMENT_URL: ${{ secrets.OPEN_SWE_DEPLOYMENT_URL }}
+
+jobs:
+  # ─────────────────────────────────────────────
+  # Phase 1: Wait for deployment to stabilize
+  # ─────────────────────────────────────────────
+  wait-for-stabilization:
+    name: "⏳ Wait for deployment to stabilize"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait 60 minutes for production traffic
+        # In real usage, wait 1 hour for errors to surface
+        # For testing, we skip this wait
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "Production push detected. Waiting 60 minutes for stabilization..."
+            sleep 3600
+          else
+            echo "Manual trigger or test mode. Skipping wait."
+          fi
+
+  # ─────────────────────────────────────────────
+  # Phase 2: Detect regressions
+  # ─────────────────────────────────────────────
+  detect-regression:
+    name: "🔍 Detect regressions"
+    runs-on: ubuntu-latest
+    needs: wait-for-stabilization
+    outputs:
+      regression_detected: ${{ steps.detect.outputs.regression_detected }}
+      regression_count: ${{ steps.detect.outputs.regression_count }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install langsmith scipy
+
+      - name: Get git diff for this deployment
+        run: |
+          git log --oneline -5
+          git diff HEAD~1 HEAD > /tmp/deploy.patch || echo "No previous commit" > /tmp/deploy.patch
+          echo "Git diff size: $(wc -c < /tmp/deploy.patch) bytes"
+
+      - name: Run regression detection
+        id: detect
+        run: |
+          DEPLOY_TIME="${{ github.event.inputs.deploy_time }}"
+          PROJECT="${{ github.event.inputs.project_name || 'gtm-agent' }}"
+          WINDOW="${{ github.event.inputs.window_hours || '1.0' }}"
+
+          python scripts/detect_regression.py \
+            --project "$PROJECT" \
+            --window-hours "$WINDOW" \
+            --baseline-days 7 \
+            --output regression_report.json \
+            ${DEPLOY_TIME:+--deploy-time "$DEPLOY_TIME"} \
+            && REGRESSION=false || REGRESSION=true
+
+          echo "regression_detected=$REGRESSION" >> $GITHUB_OUTPUT
+
+          if [ -f regression_report.json ]; then
+            COUNT=$(python3 -c "import json; d=json.load(open('regression_report.json')); print(d.get('regression_count', 0))")
+            echo "regression_count=$COUNT" >> $GITHUB_OUTPUT
+            echo "Regression count: $COUNT"
+          fi
+
+      - name: Upload regression report
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-report
+          path: regression_report.json
+
+      - name: Upload git diff
+        uses: actions/upload-artifact@v4
+        with:
+          name: git-diff
+          path: /tmp/deploy.patch
+
+  # ─────────────────────────────────────────────
+  # Phase 3: Triage with AI Agent
+  # ─────────────────────────────────────────────
+  triage:
+    name: "🤖 Triage Agent analysis"
+    runs-on: ubuntu-latest
+    needs: detect-regression
+    if: needs.detect-regression.outputs.regression_detected == 'true'
+    outputs:
+      confirmed_regression: ${{ steps.triage.outputs.confirmed_regression }}
+      recommended_action: ${{ steps.triage.outputs.recommended_action }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install langgraph-sdk langsmith
+
+      - name: Download regression report
+        uses: actions/download-artifact@v4
+        with:
+          name: regression-report
+
+      - name: Download git diff
+        uses: actions/download-artifact@v4
+        with:
+          name: git-diff
+
+      - name: Run Triage Agent
+        id: triage
+        run: |
+          python scripts/trigger_triage.py \
+            --regression-report regression_report.json \
+            --git-diff deploy.patch \
+            --deployment-url "$TRIAGE_AGENT_DEPLOYMENT_URL" \
+            --output triage_verdict.json \
+            && CONFIRMED=false || CONFIRMED=true
+
+          echo "confirmed_regression=$CONFIRMED" >> $GITHUB_OUTPUT
+
+          if [ -f triage_verdict.json ]; then
+            ACTION=$(python3 -c "import json; d=json.load(open('triage_verdict.json')); print(d.get('recommended_action', 'monitor'))")
+            echo "recommended_action=$ACTION" >> $GITHUB_OUTPUT
+            echo "Recommended action: $ACTION"
+
+            CONFIDENCE=$(python3 -c "import json; d=json.load(open('triage_verdict.json')); print(d.get('confidence', 0))")
+            echo "Triage confidence: $CONFIDENCE"
+          fi
+
+      - name: Upload triage verdict
+        uses: actions/upload-artifact@v4
+        with:
+          name: triage-verdict
+          path: triage_verdict.json
+
+  # ─────────────────────────────────────────────
+  # Phase 4: Auto-fix with Open SWE
+  # ─────────────────────────────────────────────
+  auto-fix:
+    name: "🔧 Open SWE auto-fix"
+    runs-on: ubuntu-latest
+    needs: [detect-regression, triage]
+    if: |
+      needs.triage.outputs.confirmed_regression == 'true' &&
+      needs.triage.outputs.recommended_action == 'open_pr'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install langgraph-sdk langsmith PyGithub
+
+      - name: Download regression report
+        uses: actions/download-artifact@v4
+        with:
+          name: regression-report
+
+      - name: Download triage verdict
+        uses: actions/download-artifact@v4
+        with:
+          name: triage-verdict
+
+      - name: Trigger Open SWE
+        run: |
+          python scripts/trigger_open_swe.py \
+            --triage-verdict triage_verdict.json \
+            --regression-report regression_report.json \
+            --repo "${{ github.repository }}" \
+            --open-swe-url "$OPEN_SWE_DEPLOYMENT_URL" \
+            --output fix_result.json
+
+      - name: Upload fix result
+        uses: actions/upload-artifact@v4
+        with:
+          name: fix-result
+          path: fix_result.json
+
+  # ─────────────────────────────────────────────
+  # Phase 5: Summary notification
+  # ─────────────────────────────────────────────
+  notify:
+    name: "📊 Pipeline summary"
+    runs-on: ubuntu-latest
+    needs: [detect-regression, triage, auto-fix]
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+
+      - name: Print pipeline summary
+        run: |
+          echo "## Self-Healing Pipeline Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ -f regression-report/regression_report.json ]; then
+            REGRESSION=$(python3 -c "import json; d=json.load(open('regression-report/regression_report.json')); print(d.get('regression_detected', False))")
+            COUNT=$(python3 -c "import json; d=json.load(open('regression-report/regression_report.json')); print(d.get('regression_count', 0))")
+            echo "### Regression Detection" >> $GITHUB_STEP_SUMMARY
+            echo "- Regression detected: $REGRESSION" >> $GITHUB_STEP_SUMMARY
+            echo "- Regression count: $COUNT" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f triage-verdict/triage_verdict.json ]; then
+            CONFIRMED=$(python3 -c "import json; d=json.load(open('triage-verdict/triage_verdict.json')); print(d.get('is_regression', False))")
+            ACTION=$(python3 -c "import json; d=json.load(open('triage-verdict/triage_verdict.json')); print(d.get('recommended_action', 'N/A'))")
+            CONFIDENCE=$(python3 -c "import json; d=json.load(open('triage-verdict/triage_verdict.json')); print(d.get('confidence', 'N/A'))")
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Triage Agent Verdict" >> $GITHUB_STEP_SUMMARY
+            echo "- Confirmed regression: $CONFIRMED" >> $GITHUB_STEP_SUMMARY
+            echo "- Confidence: $CONFIDENCE" >> $GITHUB_STEP_SUMMARY
+            echo "- Recommended action: $ACTION" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ -f fix-result/fix_result.json ]; then
+            STATUS=$(python3 -c "import json; d=json.load(open('fix-result/fix_result.json')); print(d.get('status', 'N/A'))")
+            ISSUE=$(python3 -c "import json; d=json.load(open('fix-result/fix_result.json')); print(d.get('issue_url', 'N/A'))")
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### Auto-Fix" >> $GITHUB_STEP_SUMMARY
+            echo "- Status: $STATUS" >> $GITHUB_STEP_SUMMARY
+            echo "- Issue: $ISSUE" >> $GITHUB_STEP_SUMMARY
+          fi

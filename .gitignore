@@ -1,0 +1,11 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+dist/
+*.egg-info/
+.pytest_cache/
+regression_report.json
+triage_verdict.json
+fix_result.json
+*.patch
