@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "GTM Agent self-healing pipeline: LangSmith Deployment + Triage Agent + Open SWE"
 requires-python = ">=3.11"
 dependencies = [
-    "deepagents>=0.1.0",
+    "deepagents>=0.5.0",
     "langgraph>=0.3.0",
     "langgraph-sdk>=0.1.0",
     "langsmith>=0.3.0",
@@ -30,6 +30,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/gtm_agent", "src/triage_agent"]
+
+[tool.hatch.build.targets.wheel.sources]
+"src/gtm_agent" = "gtm_agent"
+"src/triage_agent" = "triage_agent"
 
 [tool.ruff]
 line-length = 100

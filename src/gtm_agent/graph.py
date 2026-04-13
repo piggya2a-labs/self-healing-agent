@@ -11,12 +11,10 @@ from __future__ import annotations
 import os
 from datetime import datetime, timezone
 
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-
 from deepagents import create_deep_agent
 
-DEFAULT_MODEL = os.getenv("GTM_AGENT_MODEL", "anthropic:claude-sonnet-4-6")
+DEFAULT_MODEL = os.getenv("GTM_AGENT_MODEL", "openai:gpt-4.1-mini")
 
 SYSTEM_PROMPT = """
 You are a GTM (Go-To-Market) research agent for the piggya2a-labs organization.
@@ -65,41 +63,9 @@ def get_deployment_info() -> dict:
     }
 
 
-SUBAGENTS = [
-    {
-        "name": "researcher",
-        "description": "Use for evidence collection and source-grounded fact finding.",
-        "system_prompt": (
-            "You are a focused researcher. Gather evidence, list assumptions, and "
-            "report contradictions clearly. Always cite sources when possible."
-        ),
-        "tools": [utc_now],
-    },
-    {
-        "name": "critic",
-        "description": "Use for adversarial review of drafts and plans.",
-        "system_prompt": (
-            "You are a critical reviewer. Find weak logic, untested assumptions, and "
-            "missing constraints. Be concise and specific."
-        ),
-        "tools": [utc_now],
-    },
-]
-
-
-def _build_agent(backend=None):
-    return create_deep_agent(
-        model=DEFAULT_MODEL,
-        tools=[utc_now, get_deployment_info],
-        backend=backend,
-        system_prompt=SYSTEM_PROMPT,
-        subagents=SUBAGENTS,
-    )
-
-
-def get_agent(config: RunnableConfig):
-    """Entry point for LangSmith Deployment."""
-    from langgraph_sdk.runtime import ServerRuntime
-
-    backend = ServerRuntime(config)
-    return _build_agent(backend=backend)
+# LangSmith Deployment requires a CompiledStateGraph exposed at module level
+graph = create_deep_agent(
+    model=DEFAULT_MODEL,
+    tools=[utc_now, get_deployment_info],
+    system_prompt=SYSTEM_PROMPT,
+)

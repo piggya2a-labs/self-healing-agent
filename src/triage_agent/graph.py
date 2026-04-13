@@ -15,12 +15,11 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
 from deepagents import create_deep_agent
 
-DEFAULT_MODEL = os.getenv("TRIAGE_AGENT_MODEL", "anthropic:claude-opus-4-6")
+DEFAULT_MODEL = os.getenv("TRIAGE_AGENT_MODEL", "openai:gpt-4.1-mini")
 
 SYSTEM_PROMPT = """
 You are a production error Triage Agent. Your job is to determine whether a set of
@@ -159,19 +158,9 @@ def run_poisson_regression_test(
         return {"error": "scipy not available", "is_significant": False}
 
 
-def _build_agent(backend=None):
-    return create_deep_agent(
-        model=DEFAULT_MODEL,
-        tools=[utc_now, normalize_error_signature, classify_file_type, run_poisson_regression_test],
-        backend=backend,
-        system_prompt=SYSTEM_PROMPT,
-        subagents=[],  # Triage agent works alone, no sub-agents needed
-    )
-
-
-def get_agent(config: RunnableConfig):
-    """Entry point for LangSmith Deployment."""
-    from langgraph_sdk.runtime import ServerRuntime
-
-    backend = ServerRuntime(config)
-    return _build_agent(backend=backend)
+# LangSmith Deployment requires a CompiledStateGraph exposed at module level
+graph = create_deep_agent(
+    model=DEFAULT_MODEL,
+    tools=[utc_now, normalize_error_signature, classify_file_type, run_poisson_regression_test],
+    system_prompt=SYSTEM_PROMPT,
+)
