@@ -12,7 +12,7 @@ on:
       project_name:
         description: "LangSmith project name"
         required: false
-        default: "gtm-agent"
+        default: "self-healing-agent"
         type: string
       window_hours:
         description: "Monitoring window in hours"
@@ -82,7 +82,7 @@ jobs:
         id: detect
         run: |
           DEPLOY_TIME="${{ github.event.inputs.deploy_time }}"
-          PROJECT="${{ github.event.inputs.project_name || 'gtm-agent' }}"
+          PROJECT="${{ github.event.inputs.project_name || 'self-healing-agent' }}"
           WINDOW="${{ github.event.inputs.window_hours || '1.0' }}"
 
           python scripts/detect_regression.py \
