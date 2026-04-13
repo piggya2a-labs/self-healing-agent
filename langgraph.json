@@ -3,7 +3,8 @@
   "dependencies": ["."],
   "graphs": {
     "gtm_agent": "gtm_agent.graph:graph",
-    "triage_agent": "triage_agent.graph:graph"
+    "triage_agent": "triage_agent.graph:graph",
+    "ops_agent": "ops_agent.graph:graph"
   },
   "env": ".env",
   "image_distro": "wolfi"
